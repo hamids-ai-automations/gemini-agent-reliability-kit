@@ -1,119 +1,143 @@
 # Gemini Agent Reliability Kit (GAR Kit)
 
-A dependency-light Python kit that measures how reliable a Gemini / Vertex AI agent is at the things that actually
-break in production: **tool calling, structured output, retry behaviour, latency and cost**.
+[![ci](https://github.com/hamids-ai-automations/gemini-agent-reliability-kit/actions/workflows/ci.yml/badge.svg)](https://github.com/hamids-ai-automations/gemini-agent-reliability-kit/actions/workflows/ci.yml)
+[![python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](pyproject.toml)
+[![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-It ships a labelled eval suite format, a report-card renderer, and a CLI that exits non-zero when an agent drops
-below your quality gate — so it can run in CI before an agent change reaches users.
+Most Gemini agent failures are not "the model is dumb". They are concrete, boring, and repeatable:
+
+- the model picks the right tool but drops a required argument,
+- it returns JSON that is 95% correct and unusable,
+- it retries four times with the same backoff and burns your quota,
+- one case in the suite takes 9 seconds and nobody notices until it is in production.
+
+GAR Kit turns a handful of labelled cases into a **report card** that names the failure, on the case, in CI,
+before your users find it. Zero dependencies, no network or API key needed for the default path.
 
 ```
-$ gar run --suite suites/smoke.json --provider mock --report reports/smoke.md
+GAR Kit report card  suite=smoke  model=mock-1  cases=6
+------------------------------------------------------------------------------
+ID                  PASS  SCHEMA  TOOLS  ARGS  RETRY  LATENCY  COST($)
+tool-basic          no    ok      ok     ok    FAIL   ok       0.000000
+schema-json         no    ok      ok     ok    FAIL   ok       0.000000
+------------------------------------------------------------------------------
+pass rate 0.0%  (gate 90.0%)  -> FAIL
+failures by check: retry=6
+
+EVIDENCE
+  tool-basic / retry: 5 attempts exceeded budget of 3
+  schema-json / retry: 5 attempts exceeded budget of 3
 ```
 
-```
-GAR KIT REPORT CARD  suite=smoke  provider=mock  cases=6
----------------------------------------------------------------------
-ID                 PASS  SCHEMA  TOOLS  ARGS  RETRY  LATENCY  COST($)
-smoke/tool-basic    yes     ok     ok    ok     ok      ok    0.000042
-smoke/schema-json   yes     ok     ok    ok     ok      ok    0.000038
-...
----------------------------------------------------------------------
-pass rate   100.0%  (gate 90.0%)  -> PASS
-p50 latency   412 ms   p95 latency   980 ms   total cost $0.00031
-```
-
-## Why this exists
-
-Most agent demos are graded by eyeballing chat output. That is not a measurement. GAR Kit turns "the agent looked
-fine" into a number that fails a build when it regresses.
-
-Four checks, each independently scored so you can see *which* dimension broke:
-
-| Check | Question it answers |
-| --- | --- |
-| `schema` | Did the structured output satisfy the declared JSON schema? |
-| `tool_call` | Did the agent call the right tool, with arguments that match the contract? |
-| `retry` | Did transient failures recover without exceeding the attempt budget or collapsing the backoff curve? |
-| `latency` | Did the turn finish inside the case budget? |
-
-## Install
+## Quickstart
 
 ```bash
 git clone https://github.com/hamids-ai-automations/gemini-agent-reliability-kit
 cd gemini-agent-reliability-kit
-python -m venv .venv
-# Windows: .venv\Scripts\activate      POSIX: source .venv/bin/activate
+python -m venv .venv && . .venv/Scripts/activate   # Windows; use .venv/bin/activate on macOS/Linux
 pip install -e ".[dev]"
+
+gar run --suite suites/smoke.json --provider mock --report reports/smoke.md
 ```
 
-The core kit uses only the standard library. `google-genai` is optional and only needed for the live Gemini
-provider; the `mock` provider runs the whole pipeline with zero network calls and zero credentials.
+Exit code is `0` on a pass and `1` when the gate fails, so it drops straight into a CI step with no wrapper.
+The mock provider is deterministic: same suite in, same card out, no credentials.
 
-## Run against a real model
+## Running against a real model
 
 ```bash
-set GEMINI_API_KEY=...            # PowerShell: $env:GEMINI_API_KEY = "..."
-gar run --suite suites/smoke.json --provider gemini --model gemini-2.0-flash \
-        --report reports/gemini-smoke.md --json reports/gemini-smoke.json
+# PowerShell
+$env:GEMINI_API_KEY = "...."
+gar run --suite suites/smoke.json --provider gemini --model gemini-2.0-flash `
+        --report reports/gemini-smoke.md --json reports/gemini-smoke.json --fail-on-gate
 ```
 
-Never commit a key. `.env` is gitignored, and the kit never logs request headers.
+The Gemini provider uses the plain REST endpoint over `urllib` — no SDK, no transitive dependency tree.
+It reports what actually happened: `attempts`, `backoff_ms`, `usageMetadata` token counts. Nothing is estimated
+except the price table, and if the response carries no usage metadata the cost is reported as `0`, never invented.
+
+## What gets checked
+
+| check | question it answers | failure looks like |
+| --- | --- | --- |
+| `schema` | Does the structured output satisfy the declared subset of JSON Schema? | missing key, wrong type, unparsable JSON |
+| `tool_call` | Did the model pick the expected tool (and not a dangerous one)? | `delete_everything` instead of `get_weather` |
+| `args` | Did the call carry every required argument with the expected value? | `{}` sent to a tool that needs `city` |
+| `retry` | Did the turn stay inside the attempt budget with growing backoff? | 5 attempts, flat 40 ms spacing |
+| `latency` | Did the case stay inside `max_latency_ms`? | p95 regression nobody caught in review |
+
+Every failure carries a one-line evidence string naming the case and the check, so a red CI job tells you what to
+fix instead of just that something is wrong.
 
 ## Suite format
-
-A suite is JSON (or YAML if PyYAML is installed) describing labelled cases:
 
 ```json
 {
   "name": "smoke",
+  "gate": {"min_pass_rate": 0.9},
   "cases": [
     {
       "id": "tool-basic",
       "prompt": "What is the weather in Lahore right now?",
-      "tools": [{"name": "get_weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}],
+      "tools": [{"name": "get_weather", "parameters": {
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"]}}],
       "expected_tool": "get_weather",
       "expected_args": {"city": "Lahore"},
-      "max_latency_ms": 4000
+      "max_latency_ms": 4000,
+      "max_attempts": 3
     }
   ]
 }
 ```
 
-`expected_args` is a **subset** match: extra arguments the model supplies are reported but do not fail the case,
-because over-specified arguments are usually harmless while missing ones are not.
+Anything you cannot assert on is omitted; a case with no `expected_tool` simply skips the tool checks.
+
+## Example artefacts
+
+Committed under [`docs/`](docs) so the output is visible without running anything:
+
+- `example-report-pass.md` / `.json` — a clean run
+- `example-report-fail-retry-storm.md` — retry budget blown, everything else fine
+- `example-report-fail-wrong-tool.md` — correct arguments, wrong tool
 
 ## Architecture
 
 ```
-suite.json --> Runner --> Provider (mock | gemini)
-                 |            |
-                 |            +--> Turn(text, tool_calls, usage, latency, attempts, backoff)
-                 |
-                 +--> checks: schema | tool_call | retry | latency
-                 |
-                 +--> CaseResult --> aggregates --> report card (text / markdown / json) --> CI exit code
+suite.json --> runner --> provider (mock | gemini)
+                              |
+                              +--> Turn(text, tool_calls, usage, latency_ms, attempts, backoff_ms)
+                              |
+                 checks: schema | tool_call | args | retry | latency
+                              |
+                 CaseResult --> aggregates (pass rate, p50/p95, cost) --> report card
+                              |
+                              +--> markdown / json / text  -->  exit code (CI gate)
 ```
 
-See [docs/architecture.md](docs/architecture.md) for the design decisions and the failure modes each check targets.
+Design notes, extension points and the reasoning behind the check set live in
+[`docs/architecture.md`](docs/architecture.md).
 
-## Cost model
+## Not in scope (on purpose)
 
-Cost is computed from a small, explicit pricing table in `gar/metrics.py`. Prices are per 1M tokens, configurable,
-and **reported as an estimate** — always confirm against your billing console before quoting a number. The kit never
-invents usage: if the provider does not return `usageMetadata`, token counts stay at zero and cost is reported as 0.
+- No leaderboard of model scores. A model benchmark ages badly; a suite you own does not.
+- No LLM-as-judge. Judging with a model makes the harness as flaky as the thing it measures.
+- No dashboard. A markdown card diffed in a PR is a better review artefact than a chart nobody opens.
 
 ## Status
 
 - [x] Eval suite format + runner
 - [x] Four reliability checks with per-case evidence
-- [x] Mock provider (offline, deterministic) and live Gemini REST provider
-- [x] Report card: text, markdown, JSON; CI gate via exit code
-- [x] pytest suite (no network, no credentials)
-- [ ] Vertex AI provider (in progress)
-- [ ] HTML report card published to Firebase Hosting
+- [x] Mock provider (offline, deterministic) + live Gemini REST provider
+- [x] Report card: text / markdown / JSON, CI gate via exit code
+- [x] 53 tests, no network or credentials required
+- [x] CI on Python 3.10 / 3.11 / 3.12
+- [ ] Vertex AI provider
+- [ ] HTML report card
 
 ## License
 
 MIT — see [LICENSE](LICENSE).
 
-Built and maintained by [Muhammad Hamid](https://me.developers.google.com/u/hamidautomations).
+Built by Muhammad Hamid — [Google Developer profile](https://me.developers.google.com/u/hamidautomations).
