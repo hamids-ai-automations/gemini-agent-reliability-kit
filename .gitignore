@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Secrets and local state
+.env
+.env.*
+*.key
+reports/
+.pytest_tmp/
+.pt/
+_*.txt
+tests_out.txt
