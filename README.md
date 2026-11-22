@@ -40,7 +40,8 @@ pip install -e ".[dev]"
 gar run --suite suites/smoke.json --provider mock --report reports/smoke.md
 ```
 
-Exit code is `0` on a pass and `1` when the gate fails, so it drops straight into a CI step with no wrapper.
+Add `--fail-on-gate` to turn the gate into an exit code: `1` when the gate is missed, `0` when it passes. Without
+the flag a failing card still exits `0`, which is what you want for an exploratory run and not what you want in CI.
 The mock provider is deterministic: same suite in, same card out, no credentials.
 
 ## Running against a real model
@@ -117,7 +118,8 @@ suite.json --> runner --> provider (mock | gemini)
 ```
 
 Design notes, extension points and the reasoning behind the check set live in
-[`docs/architecture.md`](docs/architecture.md).
+[`docs/architecture.md`](docs/architecture.md). A longer write-up on why the output is a named failure rather than a
+score: [`docs/article-01-let-your-agent-failures-name-themselves.md`](docs/article-01-let-your-agent-failures-name-themselves.md).
 
 ## Not in scope (on purpose)
 
